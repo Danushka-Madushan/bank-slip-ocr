@@ -1,10 +1,12 @@
-# Pin to Debian Bookworm slim for reproducible OpenCV/Paddle C++ ABI compatibility
-FROM python:3.11-slim-bookworm
+# Use Python 3.12 on Debian Bookworm slim for full compatibility with PaddleOCR 3.7+ wheels
+FROM python:3.12-slim-bookworm
 
 # Runtime & memory optimization environment variables:
 # - MALLOC_ARENA_MAX=2 prevents glibc memory bloat in multi-threaded C++ (Paddle/OpenCV)
-# - OMP_NUM_THREADS=2 prevents CPU thrashing on 1-2 vCPU VPS instances
-# - HOME=/app ensures PaddleOCR caches models inside /app/.paddleocr
+# - OMP_NUM_THREADS=2 prevents CPU thrashing on 1-2 vCPU Railway instances
+# - PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=0 prevents PIR-oneDNN CPU crashes
+# - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True skips network pings on startup
+# - HOME=/app ensures PaddleOCR caches models inside /app/.paddlex & /app/.paddleocr
 # - RECEIPT_DB_PATH points SQLite (and its -wal/-shm files) to a mountable volume directory
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,6 +14,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     MALLOC_ARENA_MAX=2 \
     OMP_NUM_THREADS=2 \
+    PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=0 \
+    FLAGS_use_mkldnn=0 \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     HOME=/app \
     RECEIPT_DB_PATH=/app/data/receipts.db
 
@@ -37,26 +42,18 @@ RUN pip3 install -r requirements.txt
 # Switch to non-root user before pre-downloading models so cache ownership matches runtime
 USER appuser
 
-# Pre-download and bake PaddleOCR English models into the image layer during build.
-# This eliminates cold-start downloads and prevents healthcheck timeouts on boot.
+# Pre-download only the required PaddleOCR 3.x detection, orientation, and recognition models
 RUN python -c "from paddleocr import PaddleOCR; \
-    PaddleOCR(use_angle_cls=True, lang='en', show_log=False)" || \
-    python -c "from paddleocr import PaddleOCR; \
-    PaddleOCR(lang='en')"
+    PaddleOCR(lang='en', enable_mkldnn=False, use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=True)"
 
 # Copy application source code last for fast rebuilds when editing main.py
 COPY --chown=appuser:appuser main.py .
 
-# Persistent storage note:
-# Railway does not support Dockerfile VOLUME instructions.
-# To persist receipts.db, add a Volume in Railway Dashboard -> Service -> Volumes with mount path: /app/data
-
 EXPOSE 8000
 
 # Health check against /health endpoint (supports Railway's dynamic $PORT)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import os, urllib.request; port = os.getenv('PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3)" || exit 1
 
 # Run Uvicorn with dynamic $PORT support for Railway (defaults to 8000 for local runs)
-# Using 'exec' ensures Uvicorn receives Unix signals (SIGTERM/SIGINT) directly for graceful shutdown
 CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers --timeout-keep-alive 15"]
