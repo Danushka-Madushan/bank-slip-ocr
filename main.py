@@ -19,6 +19,14 @@ Environment variables (all optional):
     LOW_TRUST_THRESHOLD, PHASH_SCAN_LIMIT
 """
 from __future__ import annotations
+from PIL import ExifTags, Image, ImageChops, ImageOps
+from paddleocr import PaddleOCR
+from fastapi.concurrency import run_in_threadpool
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from dateutil import parser as date_parser
+import numpy as np
+import imagehash
+import cv2
 
 import hashlib
 import io
@@ -29,7 +37,8 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Iterable
+from typing import Any, cast
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -40,14 +49,6 @@ os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
-import cv2
-import imagehash
-import numpy as np
-from dateutil import parser as date_parser
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.concurrency import run_in_threadpool
-from paddleocr import PaddleOCR
-from PIL import ExifTags, Image, ImageChops, ImageOps
 
 log = logging.getLogger("receipt-engine")
 LK_TZ = timezone(timedelta(hours=5, minutes=30))  # Sri Lanka has no DST
@@ -59,13 +60,15 @@ ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class Config:
-    max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
+    max_upload_bytes: int = int(
+        os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
     max_pixels: int = int(os.getenv("MAX_PIXELS", 25_000_000))
     ocr_max_side: int = 1800          # larger images are downscaled for OCR
     ocr_min_side: int = 900           # smaller images are upscaled 2x for OCR
     ocr_low_conf: float = 0.70
     ela_quality: int = 90
-    phash_max_distance: int = 4       # Hamming distance (of 64 bits) for "near duplicate"
+    # Hamming distance (of 64 bits) for "near duplicate"
+    phash_max_distance: int = 4
     phash_scan_limit: int = int(os.getenv("PHASH_SCAN_LIMIT", 5000))
     min_bank_score: int = 3
     max_receipt_age_days: int = int(os.getenv("MAX_RECEIPT_AGE_DAYS", 30))
@@ -166,13 +169,15 @@ def parse_ocr_result(raw) -> list[OcrItem]:
     else:  # PaddleOCR 2.x: [[box, (text, conf)], ...]
         for line in page:
             (text, conf) = line[1]
-            items.append(OcrItem(str(text).strip(), float(conf), _bbox(line[0])))
+            items.append(OcrItem(str(text).strip(),
+                         float(conf), _bbox(line[0])))
     return [i for i in items if i.text]
 
 
 class OcrEngine:
     def __init__(self) -> None:
-        self._lock = threading.Lock()  # Paddle predictors are not safe to share across threads
+        # Paddle predictors are not safe to share across threads
+        self._lock = threading.Lock()
         self._engine, self._is_v3 = self._build()
 
     @staticmethod
@@ -230,13 +235,20 @@ class OcrEngine:
 
     def read(self, bgr: np.ndarray) -> list[OcrItem]:
         with self._lock:
-            if self._is_v3 and hasattr(self._engine, "predict"):
-                raw = list(self._engine.predict(bgr))
+            predict = getattr(self._engine, "predict", None)
+
+            if callable(predict):
+                # PaddleOCR 3.x
+                result = predict(bgr)
+                raw = list(cast(Iterable[Any], result))
             else:
+                # PaddleOCR 2.x compatibility
+                legacy_ocr = getattr(self._engine, "ocr")
                 try:
-                    raw = self._engine.ocr(bgr, cls=True)
+                    raw = legacy_ocr(bgr, cls=True)
                 except TypeError:
-                    raw = self._engine.ocr(bgr)
+                    raw = legacy_ocr(bgr)
+
         return parse_ocr_result(raw)
 
 
@@ -288,7 +300,8 @@ class Document:
         le = self.text.find("\n", end)
         le = len(self.text) if le == -1 else le
         own = f"{self.text[ls:start]} {self.text[end:le]}"
-        letters = re.sub(r"[^A-Za-z]", "", re.sub(r"\b(?:LKR|RS)\b\.?", "", own, flags=re.I))
+        letters = re.sub(r"[^A-Za-z]", "",
+                         re.sub(r"\b(?:LKR|RS)\b\.?", "", own, flags=re.I))
         if len(letters) < 3 and ls > 0:
             ps = self.text.rfind("\n", 0, ls - 1) + 1
             own = f"{self.text[ps:ls - 1]} {own}"
@@ -322,10 +335,13 @@ _NUM = r"(\d{1,3}(?:,\s?\d{3})+(?:\s?\.\s?\d{1,2})?|\d+(?:\s?\.\s?\d{1,2})?)"
 AMOUNT_PATTERNS = (
     re.compile(r"(?:\bLKR|\bRS\b\.?|රු\.?)\s*" + _NUM, re.I),
     re.compile(_NUM + r"\s*(?:LKR|RS)\b", re.I),
-    re.compile(r"\b(?:TRANSFER\s+|TOTAL\s+|PAID\s+|TXN\s+)?AMOUNT\b[^\d\n]{0,25}(?:\n\s*)?" + _NUM, re.I),
+    re.compile(
+        r"\b(?:TRANSFER\s+|TOTAL\s+|PAID\s+|TXN\s+)?AMOUNT\b[^\d\n]{0,25}(?:\n\s*)?" + _NUM, re.I),
 )
-AMOUNT_POSITIVE = ("AMOUNT", "TRANSFER", "PAID", "PAYMENT", "TOTAL", "SENT", "DEBIT")
-AMOUNT_NEGATIVE = ("FEE", "CHARGE", "BALANCE", "AVAILABLE", "COMMISSION", "TAX", "LIMIT")
+AMOUNT_POSITIVE = ("AMOUNT", "TRANSFER", "PAID",
+                   "PAYMENT", "TOTAL", "SENT", "DEBIT")
+AMOUNT_NEGATIVE = ("FEE", "CHARGE", "BALANCE", "AVAILABLE",
+                   "COMMISSION", "TAX", "LIMIT")
 
 
 def extract_amount(doc: Document) -> tuple[Optional[Field], bool]:
@@ -341,7 +357,8 @@ def extract_amount(doc: Document) -> tuple[Optional[Field], bool]:
             if not (0 < val < 10**9) or m.start(1) in seen:
                 continue
             ctx = doc.line_context(m.start(1), m.end(1))
-            score = sum(w in ctx for w in AMOUNT_POSITIVE) - 2 * sum(w in ctx for w in AMOUNT_NEGATIVE)
+            score = sum(w in ctx for w in AMOUNT_POSITIVE) - 2 * \
+                sum(w in ctx for w in AMOUNT_NEGATIVE)
             seen[m.start(1)] = (score, m.start(1), val, m)
     if not seen:
         return None, False
@@ -382,12 +399,13 @@ def extract_reference(doc: Document) -> Optional[Field]:
                 value = tok.group(0).strip("-")
                 if len(value) < 6:
                     continue
-                between = doc.text[label.end() : tok.start()]
+                between = doc.text[label.end(): tok.start()]
                 if NON_REF_PREFIX.search(between) or _DATEISH.match(value):
                     continue
-                if re.match(r"\.\d{1,2}\b", doc.text[tok.end() : tok.end() + 3]):
+                if re.match(r"\.\d{1,2}\b", doc.text[tok.end(): tok.end() + 3]):
                     continue
-                is_hex_ref = bool(re.match(r"^[0-9A-F]{4}(?:-[0-9A-F]{4}){2,4}$", value, re.I))
+                is_hex_ref = bool(
+                    re.match(r"^[0-9A-F]{4}(?:-[0-9A-F]{4}){2,4}$", value, re.I))
                 if sum(c.isdigit() for c in value) >= 4 or is_hex_ref:
                     return Field(value.upper(), value, doc.items_in(tok.start(), tok.end()))
     return None
@@ -398,7 +416,8 @@ ACCT_LABEL = re.compile(
     r"(?:BANK\s+)?(?:A/?C|ACC(?:OUNT)?|WALLET)?(?:\s*(?:NO\.?|NUMBER|#))?",
     re.I,
 )
-ACCT_TOKEN = re.compile(r"\b(\d{2,6}[\*X#]{2,10}\d{2,6}|[\*X#]{2,10}\d{3,6}|\d{7,18})\b", re.I)
+ACCT_TOKEN = re.compile(
+    r"\b(\d{2,6}[\*X#]{2,10}\d{2,6}|[\*X#]{2,10}\d{3,6}|\d{7,18})\b", re.I)
 
 
 def extract_beneficiary_account(doc: Document) -> Optional[Field]:
@@ -426,7 +445,8 @@ def verify_beneficiary_account(
     if extracted_acct:
         raw_acct = str(extracted_acct.value)
         if any(ch in raw_acct for ch in ("*", "X", "#")):
-            parts = [re.sub(r"\D", "", p) for p in re.split(r"[\*X#]+", raw_acct, flags=re.I) if p]
+            parts = [re.sub(r"\D", "", p) for p in re.split(
+                r"[\*X#]+", raw_acct, flags=re.I) if p]
             if len(parts) == 2 and clean_expected.startswith(parts[0]) and clean_expected.endswith(parts[1]):
                 return Signal(
                     "beneficiary_account_matches_masked",
@@ -464,8 +484,10 @@ _MON = r"(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*"
 DATE_PATTERNS = (
     re.compile(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}" + _TIME, re.I),
     re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}" + _TIME, re.I),
-    re.compile(r"\b\d{1,2}(?:ST|ND|RD|TH)?[\s\-]*" + _MON + r"[\s,\-]*\d{2,4}" + _TIME, re.I),
-    re.compile(r"\b" + _MON + r"\s+\d{1,2}(?:ST|ND|RD|TH)?,?\s+\d{4}" + _TIME, re.I),
+    re.compile(
+        r"\b\d{1,2}(?:ST|ND|RD|TH)?[\s\-]*" + _MON + r"[\s,\-]*\d{2,4}" + _TIME, re.I),
+    re.compile(r"\b" + _MON +
+               r"\s+\d{1,2}(?:ST|ND|RD|TH)?,?\s+\d{4}" + _TIME, re.I),
 )
 
 
@@ -481,7 +503,8 @@ def extract_datetime(doc: Document, now: datetime) -> Optional[Field]:
                 continue
             if 2000 <= dt.year <= now.year + 1:
                 candidates.append(
-                    (bool(re.search(r"\d:\d{2}", raw)), Field(dt, raw, doc.items_in(m.start(), m.end())))
+                    (bool(re.search(r"\d:\d{2}", raw)), Field(
+                        dt, raw, doc.items_in(m.start(), m.end())))
                 )
     if not candidates:
         return None
@@ -489,7 +512,8 @@ def extract_datetime(doc: Document, now: datetime) -> Optional[Field]:
     return (with_time or candidates)[0][1]
 
 
-SUCCESS_RX = re.compile(r"\b(?:SUCCESS(?:FUL(?:LY)?)?|COMPLETED|APPROVED|TRANSFERRED|PAID)\b", re.I)
+SUCCESS_RX = re.compile(
+    r"\b(?:SUCCESS(?:FUL(?:LY)?)?|COMPLETED|APPROVED|TRANSFERRED|PAID)\b", re.I)
 FAILURE_RX = re.compile(
     r"\b(?:FAILED|FAILURE|UNSUCCESSFUL|DECLINED|REJECTED|CANCELL?ED|REVERSED|PENDING|IN\s+PROGRESS|PROCESSING)\b",
     re.I,
@@ -533,7 +557,8 @@ _BANK_SIGNATURES = {
     "HSBC Sri Lanka": ((r"\bHSBC\b", 3),),
     "Standard Chartered": ((r"STANDARD\s+CHARTERED", 3),),
 }
-_BANK_RX = {b: [(re.compile(p, re.I), w) for p, w in rules] for b, rules in _BANK_SIGNATURES.items()}
+_BANK_RX = {b: [(re.compile(p, re.I), w) for p, w in rules]
+            for b, rules in _BANK_SIGNATURES.items()}
 _BENEFICIARY_BANK_CONTEXT = re.compile(
     r"\b(?:BENEFICIARY|RECEIVING|RECIPIENT|DESTINATION|TO|CREDIT)\s+BANK\b", re.I
 )
@@ -596,7 +621,8 @@ EDITOR_MARKERS = (
     "photoshop", "gimp", "canva", "picsart", "pixlr", "photopea", "paint.net", "affinity",
     "illustrator", "figma", "inkscape", "fotor", "picmonkey", "snapseed", "lightroom", "ibis paint",
 )
-_XMP_TOOL_RX = re.compile(r'(?:CreatorTool|softwareAgent)(?:="|>)([^"<]{1,200})', re.I)
+_XMP_TOOL_RX = re.compile(
+    r'(?:CreatorTool|softwareAgent)(?:="|>)([^"<]{1,200})', re.I)
 
 
 def _xmp_packet(raw: bytes) -> str:
@@ -633,7 +659,8 @@ def load_image(contents: bytes) -> tuple[Image.Image, dict]:
     try:
         img = Image.open(io.BytesIO(contents))
         if img.format not in ALLOWED_FORMATS:
-            raise HTTPException(415, f"Unsupported image format {img.format!r}; use JPEG, PNG or WEBP.")
+            raise HTTPException(
+                415, f"Unsupported image format {img.format!r}; use JPEG, PNG or WEBP.")
         if img.width * img.height > CFG.max_pixels:
             raise HTTPException(413, "Image resolution too large.")
         meta = analyze_metadata(img, contents)
@@ -641,10 +668,12 @@ def load_image(contents: bytes) -> tuple[Image.Image, dict]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(422, "Could not decode the uploaded image.") from exc
+        raise HTTPException(
+            422, "Could not decode the uploaded image.") from exc
     img = ImageOps.exif_transpose(img)
     rgba = img.convert("RGBA")
-    flat = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba).convert("RGB")
+    flat = Image.alpha_composite(
+        Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba).convert("RGB")
     return flat, meta
 
 
@@ -656,7 +685,8 @@ def prepare_for_ocr(img: Image.Image) -> tuple[Image.Image, float]:
         scale = 2.0
     else:
         return img, 1.0
-    size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
+    size = (max(1, round(img.width * scale)),
+            max(1, round(img.height * scale)))
     return img.resize(size, Image.Resampling.LANCZOS), scale
 
 
@@ -677,13 +707,15 @@ def ela_numeric_outliers(ela: np.ndarray, items: list) -> list:
         x1, y1, x2, y2 = it.bbox
         x1, y1, x2, y2 = max(x1, 0), max(y1, 0), min(x2, w), min(y2, h)
         if x2 - x1 >= 6 and y2 - y1 >= 6:
-            stats.append((it, y2 - y1, float(ela[y1:y2, x1:x2].mean()), (x1, y1, x2, y2)))
+            stats.append(
+                (it, y2 - y1, float(ela[y1:y2, x1:x2].mean()), (x1, y1, x2, y2)))
 
     flagged = []
     for it, height, val, box in stats:
         if not any(c.isdigit() for c in it.text):
             continue
-        peers = np.array([v for o, hh, v, _ in stats if o is not it and 0.7 <= hh / height <= 1.3])
+        peers = np.array(
+            [v for o, hh, v, _ in stats if o is not it and 0.7 <= hh / height <= 1.3])
         if len(peers) < 5:
             continue
         med = float(np.median(peers))
@@ -753,7 +785,8 @@ class ReceiptStore:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
-        self._db.create_function("hamming_hex", 2, _hamming_hex, deterministic=True)
+        self._db.create_function(
+            "hamming_hex", 2, _hamming_hex, deterministic=True)
         self._db.executescript(
             """
             PRAGMA journal_mode=WAL;
@@ -789,7 +822,8 @@ class ReceiptStore:
 
     def _ensure_columns(self) -> None:
         """Seamless migration if upgrading an existing v2.0 receipts.db file."""
-        existing = {r["name"] for r in self._db.execute("PRAGMA table_info(receipts)").fetchall()}
+        existing = {r["name"] for r in self._db.execute(
+            "PRAGMA table_info(receipts)").fetchall()}
         migrations = {
             "buyer_phone": "ALTER TABLE receipts ADD COLUMN buyer_phone TEXT",
             "beneficiary_account": "ALTER TABLE receipts ADD COLUMN beneficiary_account TEXT",
@@ -823,10 +857,12 @@ class ReceiptStore:
                    )
                    WHERE hamming_hex(phash, :phash) <= :dist
                    LIMIT 20""",
-                {"phash": rec["phash"], "dist": max_distance, "scan_limit": scan_limit},
+                {"phash": rec["phash"], "dist": max_distance,
+                    "scan_limit": scan_limit},
             ).fetchall()
 
-            combined = list(exact_rows) + [r for r in phash_rows if r["id"] not in seen_ids]
+            combined = list(exact_rows) + \
+                [r for r in phash_rows if r["id"] not in seen_ids]
 
             if register:
                 self._db.execute(
@@ -844,7 +880,8 @@ class ReceiptStore:
 
     def set_risk(self, receipt_id: str, score: float) -> None:
         with self._lock:
-            self._db.execute("UPDATE receipts SET risk_score = ? WHERE id = ?", (score, receipt_id))
+            self._db.execute(
+                "UPDATE receipts SET risk_score = ? WHERE id = ?", (score, receipt_id))
             self._db.commit()
 
     def get_buyer_trust(self, phone: str) -> dict:
@@ -852,7 +889,8 @@ class ReceiptStore:
         if not norm:
             raise HTTPException(422, "Invalid phone number format.")
         with self._lock:
-            row = self._db.execute("SELECT * FROM buyers WHERE phone = ?", (norm,)).fetchone()
+            row = self._db.execute(
+                "SELECT * FROM buyers WHERE phone = ?", (norm,)).fetchone()
         if not row:
             return {
                 "phone": norm,
@@ -884,7 +922,8 @@ class ReceiptStore:
     ) -> Optional[dict]:
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._lock:
-            row = self._db.execute("SELECT * FROM receipts WHERE id = ?", (receipt_id,)).fetchone()
+            row = self._db.execute(
+                "SELECT * FROM receipts WHERE id = ?", (receipt_id,)).fetchone()
             if not row:
                 return None
             phone = normalize_phone(buyer_phone or row["buyer_phone"])
@@ -894,7 +933,8 @@ class ReceiptStore:
             )
             trust_info = None
             if phone:
-                buyer = self._db.execute("SELECT * FROM buyers WHERE phone = ?", (phone,)).fetchone()
+                buyer = self._db.execute(
+                    "SELECT * FROM buyers WHERE phone = ?", (phone,)).fetchone()
                 score = int(buyer["trust_score"]) if buyer else 100
                 flagged = int(buyer["flagged_count"]) if buyer else 0
                 verified = int(buyer["verified_count"]) if buyer else 0
@@ -951,9 +991,11 @@ def duplicate_signals(matches: list[dict], rec: dict) -> list[Signal]:
                 )
             )
             continue
-        same_ref = bool(rec["reference"]) and m["reference"] == rec["reference"]
+        same_ref = bool(
+            rec["reference"]) and m["reference"] == rec["reference"]
         if m["sha256"] == rec["sha256"]:
-            out.append(Signal("exact_duplicate_file", 0.85, f"Byte-identical file already seen: {where}."))
+            out.append(Signal("exact_duplicate_file", 0.85,
+                       f"Byte-identical file already seen: {where}."))
         elif same_ref and m["amount"] and rec["amount"] and m["amount"] != rec["amount"]:
             out.append(
                 Signal(
@@ -963,9 +1005,11 @@ def duplicate_signals(matches: list[dict], rec: dict) -> list[Signal]:
                 )
             )
         elif same_ref:
-            out.append(Signal("duplicate_reference", 0.80, f"Same bank reference already used: {where}."))
+            out.append(Signal("duplicate_reference", 0.80,
+                       f"Same bank reference already used: {where}."))
         elif not (rec["reference"] and m["reference"]):
-            out.append(Signal("near_duplicate_image", 0.40, f"Visually near-identical to {where}."))
+            out.append(Signal("near_duplicate_image", 0.40,
+                       f"Visually near-identical to {where}."))
     return out
 
 
@@ -1016,7 +1060,8 @@ def analyze_receipt(
     # ---- Content / consistency signals ----
     if not items:
         signals.append(
-            Signal("no_text_detected", 0.30, "OCR found no text; image may not be a receipt or is unreadable.")
+            Signal("no_text_detected", 0.30,
+                   "OCR found no text; image may not be a receipt or is unreadable.")
         )
     else:
         missing = [n for n, f in core_fields.items() if f is None]
@@ -1028,15 +1073,19 @@ def analyze_receipt(
                     f"Could not extract: {', '.join(missing)}.",
                 )
             )
-        weak = [n for n, f in core_fields.items() if f and f.confidence < CFG.ocr_low_conf]
+        weak = [n for n, f in core_fields.items() if f and f.confidence <
+                CFG.ocr_low_conf]
         if weak:
-            signals.append(Signal("low_confidence_field", 0.15, f"Low OCR confidence on: {', '.join(weak)}."))
+            signals.append(Signal("low_confidence_field", 0.15,
+                           f"Low OCR confidence on: {', '.join(weak)}."))
 
     if bank["name"] == "Unknown" and items:
-        signals.append(Signal("unrecognized_bank_template", 0.10, "No known bank/wallet identified."))
+        signals.append(Signal("unrecognized_bank_template",
+                       0.10, "No known bank/wallet identified."))
     if amount_ambiguous:
         signals.append(
-            Signal("ambiguous_amount", 0.15, "Several different amounts scored equally; amount may be mis-picked.")
+            Signal("ambiguous_amount", 0.15,
+                   "Several different amounts scored equally; amount may be mis-picked.")
         )
 
     if status in ("failed", "pending"):
@@ -1048,18 +1097,22 @@ def analyze_receipt(
             )
         )
     elif items and status is None:
-        signals.append(Signal("no_success_status", 0.10, "No explicit success/completed status found."))
+        signals.append(Signal("no_success_status", 0.10,
+                       "No explicit success/completed status found."))
 
     if when:
         dt = when.value
         if dt - now > timedelta(hours=1):
-            signals.append(Signal("future_dated", 0.80, f"Receipt date {dt:%Y-%m-%d %H:%M} is in the future."))
+            signals.append(Signal(
+                "future_dated", 0.80, f"Receipt date {dt:%Y-%m-%d %H:%M} is in the future."))
         elif now - dt > timedelta(days=CFG.max_receipt_age_days):
-            signals.append(Signal("stale_receipt", 0.30, f"Receipt is older than {CFG.max_receipt_age_days} days."))
+            signals.append(Signal(
+                "stale_receipt", 0.30, f"Receipt is older than {CFG.max_receipt_age_days} days."))
 
     if expected_amount is not None:
         if amount is None:
-            signals.append(Signal("amount_not_extracted", 0.30, "Expected amount supplied but none could be read."))
+            signals.append(Signal("amount_not_extracted", 0.30,
+                           "Expected amount supplied but none could be read."))
         elif amount.value != expected_amount:
             signals.append(
                 Signal(
@@ -1069,7 +1122,8 @@ def analyze_receipt(
                 )
             )
         else:
-            signals.append(Signal("amount_matches_expected", 0.0, "Receipt amount equals the expected amount."))
+            signals.append(Signal("amount_matches_expected", 0.0,
+                           "Receipt amount equals the expected amount."))
 
     if expected_account:
         if acct_sig := verify_beneficiary_account(doc, beneficiary_acct, expected_account):
@@ -1164,7 +1218,8 @@ def analyze_receipt(
     if register:
         store.set_risk(rec["id"], score)
 
-    low_conf = [{"text": i.text, "confidence": round(i.conf, 3)} for i in items if i.conf < CFG.ocr_low_conf]
+    low_conf = [{"text": i.text, "confidence": round(
+        i.conf, 3)} for i in items if i.conf < CFG.ocr_low_conf]
     ocr_out: dict = {
         "line_count": len(items),
         "mean_confidence": round(float(np.mean([i.conf for i in items])), 3) if items else None,
@@ -1204,7 +1259,8 @@ async def lifespan(app: FastAPI):
     app.state.store.close()
 
 
-app = FastAPI(title="eMerchantLK Receipt Verification Engine", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="eMerchantLK Receipt Verification Engine",
+              version="2.1.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -1261,7 +1317,8 @@ async def verify_receipt(
     if not contents:
         raise HTTPException(400, "Empty file.")
     if len(contents) > CFG.max_upload_bytes:
-        raise HTTPException(413, f"File exceeds {CFG.max_upload_bytes // (1024 * 1024)} MB limit.")
+        raise HTTPException(
+            413, f"File exceeds {CFG.max_upload_bytes // (1024 * 1024)} MB limit.")
 
     result = await run_in_threadpool(
         analyze_receipt,
