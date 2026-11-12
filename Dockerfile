@@ -32,7 +32,7 @@ WORKDIR /app
 
 # Install Python dependencies first to leverage Docker layer caching
 COPY --chown=appuser:appuser requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip3 install -r requirements.txt
 
 # Switch to non-root user before pre-downloading models so cache ownership matches runtime
 USER appuser
@@ -47,14 +47,16 @@ RUN python -c "from paddleocr import PaddleOCR; \
 # Copy application source code last for fast rebuilds when editing main.py
 COPY --chown=appuser:appuser main.py .
 
-# Declare persistent volume for SQLite database (receipts.db, receipts.db-wal, receipts.db-shm)
-# VOLUME ["/app/data"] -- this option is not supported in Railway, so we will have to mount Railway volume to /app/data in the Railway dashboard instead.
+# Persistent storage note:
+# Railway does not support Dockerfile VOLUME instructions.
+# To persist receipts.db, add a Volume in Railway Dashboard -> Service -> Volumes with mount path: /app/data
 
 EXPOSE 8000
 
-# Health check against /health endpoint
+# Health check against /health endpoint (supports Railway's dynamic $PORT)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" || exit 1
+    CMD python -c "import os, urllib.request; port = os.getenv('PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3)" || exit 1
 
-# Run Uvicorn with proxy headers enabled for Cloudflare Tunnel / Nginx / Caddy
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--timeout-keep-alive", "15"]
+# Run Uvicorn with dynamic $PORT support for Railway (defaults to 8000 for local runs)
+# Using 'exec' ensures Uvicorn receives Unix signals (SIGTERM/SIGINT) directly for graceful shutdown
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers --timeout-keep-alive 15"]
