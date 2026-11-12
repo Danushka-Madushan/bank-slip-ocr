@@ -1,0 +1,820 @@
+{
+  "info": {
+    "_postman_id": "fda2bf90-9b66-4511-8dc4-5f8dd2b6362f",
+    "name": "eMerchantLK Bank Receipt Verification Engine API",
+    "description": "Comprehensive Postman test collection for the eMerchantLK Receipt Verification Engine (v2.1.0).\n\nFeatures:\n- Automatic detection of Sri Lankan Banks (BOC, Commercial Bank, FriMi/NTB, Sampath, HNB, People's Bank, etc.)\n- Perceptual Hashing (pHash) and SHA-256 duplicate detection\n- Error Level Analysis (ELA) and image forensics\n- OCR text and field extraction (Amount, Reference, Timestamp, Beneficiary Account)\n- Merchant 1-tap verdict workflow (Approved / Rejected Fraud)\n- Global Buyer Trust Score calculation and fraud guard",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "2.1.0"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "receipt_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "buyer_phone",
+      "value": "+94771234567",
+      "type": "string"
+    },
+    {
+      "key": "order_id",
+      "value": "ORD-2026-9876",
+      "type": "string"
+    },
+    {
+      "key": "expected_amount",
+      "value": "5000.00",
+      "type": "string"
+    },
+    {
+      "key": "expected_account",
+      "value": "1234567890",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. System & Health",
+      "description": "System health and status check endpoints.",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Checks the operational status of the receipt verification engine, confirming OCR worker and SQLite database connectivity."
+          },
+          "response": [
+            {
+              "name": "200 OK - Healthy",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{baseUrl}}/health",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "health"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"ok\",\n  \"version\": \"2.1.0\"\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Service status is ok', function () {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.status).to.eql('ok');",
+                  "    pm.expect(jsonData.version).to.eql('2.1.0');",
+                  "});",
+                  "pm.test('Response time is under 500ms', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(500);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Receipt Verification & Forensics",
+      "description": "Multi-stage receipt verification endpoints doing image analysis, OCR, ELA forensics, and duplicate detection.",
+      "item": [
+        {
+          "name": "Verify Receipt (Full Analysis & Register)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "description": "Receipt image file (.jpg, .jpeg, .png, .webp). Click 'Select File' to choose your image.",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "order_id",
+                  "value": "{{order_id}}",
+                  "description": "Order or invoice identifier.",
+                  "type": "text"
+                },
+                {
+                  "key": "expected_amount",
+                  "value": "{{expected_amount}}",
+                  "description": "Expected transaction amount in LKR.",
+                  "type": "text"
+                },
+                {
+                  "key": "expected_account",
+                  "value": "{{expected_account}}",
+                  "description": "Expected merchant receiving bank account number.",
+                  "type": "text"
+                },
+                {
+                  "key": "buyer_phone",
+                  "value": "{{buyer_phone}}",
+                  "description": "Buyer phone number (+94xxxxxxxxx) to check global trust score.",
+                  "type": "text"
+                },
+                {
+                  "key": "register",
+                  "value": "true",
+                  "description": "Set to true to persist record to SQLite for future duplicate detection.",
+                  "type": "text"
+                },
+                {
+                  "key": "include_raw_text",
+                  "value": "false",
+                  "description": "Set to true if full OCR bounding text is needed (off by default to protect PII).",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/verify-receipt",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "verify-receipt"
+              ]
+            },
+            "description": "Uploads and verifies a bank payment slip against forensic heuristics, OCR, merchant expectations, and historical duplicate records."
+          },
+          "response": [
+            {
+              "name": "200 OK - Verified Commercial Bank Slip",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{baseUrl}}/verify-receipt",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "verify-receipt"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"receipt_id\": \"a1b2c3d4e5f67890123456789abcdef0\",\n  \"registered\": true,\n  \"risk\": {\n    \"score\": 4.5,\n    \"level\": \"low\",\n    \"recommendation\": \"accept\"\n  },\n  \"signals\": [\n    {\n      \"code\": \"clean_receipt\",\n      \"weight\": 0.0,\n      \"detail\": \"All key fields present with high OCR confidence.\"\n    }\n  ],\n  \"bank\": {\n    \"name\": \"Commercial Bank\",\n    \"confidence\": 0.95,\n    \"candidates\": {\n      \"Commercial Bank\": 6,\n      \"Sampath Bank\": 0\n    }\n  },\n  \"fields\": {\n    \"amount\": {\n      \"value\": \"5000.00\",\n      \"raw\": \"LKR 5,000.00\",\n      \"confidence\": 0.98\n    },\n    \"reference\": {\n      \"value\": \"COMB20261112999\",\n      \"raw\": \"Ref: COMB20261112999\",\n      \"confidence\": 0.95\n    },\n    \"datetime\": {\n      \"value\": \"2026-11-12T14:30\",\n      \"raw\": \"12/11/2026 14:30:15\",\n      \"confidence\": 0.92\n    },\n    \"beneficiary_account\": {\n      \"value\": \"1234567890\",\n      \"raw\": \"1234567890\",\n      \"confidence\": 0.96\n    },\n    \"status\": \"success\"\n  },\n  \"buyer_trust\": {\n    \"buyer_phone\": \"+94771234567\",\n    \"trust_score\": 95,\n    \"total_receipts\": 4,\n    \"fraud_count\": 0,\n    \"low_trust_warning\": false\n  },\n  \"hashes\": {\n    \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n    \"phash\": \"d4e2a1b9c7f08831\"\n  },\n  \"forensics\": {\n    \"metadata\": {\n      \"format\": \"JPEG\",\n      \"width\": 1080,\n      \"height\": 1920,\n      \"editor_markers\": []\n    },\n    \"ela\": {\n      \"computed\": true,\n      \"reliable_source\": true,\n      \"mean\": 12.4,\n      \"numeric_text_outliers\": []\n    }\n  },\n  \"ocr\": {\n    \"line_count\": 24,\n    \"mean_confidence\": 0.94,\n    \"low_confidence_count\": 0\n  },\n  \"processing_ms\": 1180\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('Response contains valid receipt verification fields', function () {",
+                  "    pm.expect(jsonData).to.have.property('receipt_id');",
+                  "    pm.expect(jsonData).to.have.property('risk');",
+                  "    pm.expect(jsonData).to.have.property('bank');",
+                  "    pm.expect(jsonData).to.have.property('fields');",
+                  "    pm.expect(jsonData).to.have.property('hashes');",
+                  "    pm.expect(jsonData).to.have.property('forensics');",
+                  "});",
+                  "if (jsonData.receipt_id) {",
+                  "    pm.collectionVariables.set('receipt_id', jsonData.receipt_id);",
+                  "    pm.environment.set('receipt_id', jsonData.receipt_id);",
+                  "    console.log('Saved receipt_id to variable: ' + jsonData.receipt_id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Verify Receipt (Dry Run - No SQLite Write)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "order_id",
+                  "value": "{{order_id}}",
+                  "type": "text"
+                },
+                {
+                  "key": "expected_amount",
+                  "value": "{{expected_amount}}",
+                  "type": "text"
+                },
+                {
+                  "key": "register",
+                  "value": "false",
+                  "description": "Dry run mode: executes full analysis but skips persisting to receipts.db",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/verify-receipt",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "verify-receipt"
+              ]
+            },
+            "description": "Tests receipt analysis in dry-run mode (register=false). Useful for testing without creating duplicate hash records."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('Registration flag is false', function () {",
+                  "    pm.expect(jsonData.registered).to.eql(false);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Verify Receipt (Full OCR Debug Mode)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "include_raw_text",
+                  "value": "true",
+                  "description": "Enables detailed OCR text lines and low confidence token debugging.",
+                  "type": "text"
+                },
+                {
+                  "key": "register",
+                  "value": "false",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/verify-receipt",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "verify-receipt"
+              ]
+            },
+            "description": "Enables raw OCR text output (`include_raw_text=true`) to inspect all parsed lines and low-confidence tokens."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('Raw text lines are included', function () {",
+                  "    pm.expect(jsonData.ocr).to.have.property('text_lines');",
+                  "    pm.expect(jsonData.ocr.text_lines).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Merchant Verdicts & Workflows",
+      "description": "Endpoints allowing merchants to approve or reject receipts and mark fraud.",
+      "item": [
+        {
+          "name": "Record Merchant Verdict (Approve)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "verdict",
+                  "value": "approved",
+                  "description": "Verdict string: approved | rejected_fraud",
+                  "type": "text"
+                },
+                {
+                  "key": "buyer_phone",
+                  "value": "{{buyer_phone}}",
+                  "description": "Buyer phone number associated with the order.",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/receipts/{{receipt_id}}/verdict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "receipts",
+                "{{receipt_id}}",
+                "verdict"
+              ]
+            },
+            "description": "Records an 'approved' verdict for a receipt, reinforcing the buyer's positive transaction history."
+          },
+          "response": [
+            {
+              "name": "200 OK - Approved",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{baseUrl}}/receipts/{{receipt_id}}/verdict",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "receipts",
+                    "{{receipt_id}}",
+                    "verdict"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"ok\",\n  \"receipt_id\": \"a1b2c3d4e5f67890123456789abcdef0\",\n  \"verdict\": \"approved\"\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('Verdict recorded as approved', function () {",
+                  "    pm.expect(jsonData.status).to.eql('ok');",
+                  "    pm.expect(jsonData.verdict).to.eql('approved');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Record Merchant Verdict (Reject as Fraud)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "verdict",
+                  "value": "rejected_fraud",
+                  "description": "Flags receipt as fraudulent and decreases buyer's Global Trust Score.",
+                  "type": "text"
+                },
+                {
+                  "key": "buyer_phone",
+                  "value": "{{buyer_phone}}",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/receipts/{{receipt_id}}/verdict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "receipts",
+                "{{receipt_id}}",
+                "verdict"
+              ]
+            },
+            "description": "Flags the receipt as fraudulent. Automatically slashes the buyer's Global Trust Score (-30 pts per fraud) across the merchant network."
+          },
+          "response": [
+            {
+              "name": "200 OK - Fraud Recorded",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{baseUrl}}/receipts/{{receipt_id}}/verdict",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "receipts",
+                    "{{receipt_id}}",
+                    "verdict"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"ok\",\n  \"receipt_id\": \"a1b2c3d4e5f67890123456789abcdef0\",\n  \"verdict\": \"rejected_fraud\"\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('Verdict recorded as rejected_fraud', function () {",
+                  "    pm.expect(jsonData.status).to.eql('ok');",
+                  "    pm.expect(jsonData.verdict).to.eql('rejected_fraud');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Buyer Global Trust & Fraud Guard",
+      "description": "Buyer trust reputation lookup based on transaction history and merchant fraud reports.",
+      "item": [
+        {
+          "name": "Check Buyer Trust Score",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/buyers/{{buyer_phone}}/trust",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "buyers",
+                "{{buyer_phone}}",
+                "trust"
+              ]
+            },
+            "description": "Calculates and returns the buyer's cross-merchant Global Trust Score (0-100), warning flag, and history."
+          },
+          "response": [
+            {
+              "name": "200 OK - Trust Score Details",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{baseUrl}}/buyers/{{buyer_phone}}/trust",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "buyers",
+                    "{{buyer_phone}}",
+                    "trust"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"buyer_phone\": \"+94771234567\",\n  \"trust_score\": 100,\n  \"total_receipts\": 5,\n  \"fraud_count\": 0,\n  \"low_trust_warning\": false\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('Contains valid buyer trust structure', function () {",
+                  "    pm.expect(jsonData).to.have.property('buyer_phone');",
+                  "    pm.expect(jsonData).to.have.property('trust_score');",
+                  "    pm.expect(jsonData).to.have.property('total_receipts');",
+                  "    pm.expect(jsonData).to.have.property('fraud_count');",
+                  "    pm.expect(jsonData).to.have.property('low_trust_warning');",
+                  "    pm.expect(jsonData.trust_score).to.be.within(0, 100);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Edge Cases & Validation Errors",
+      "description": "Negative testing and schema validation edge cases.",
+      "item": [
+        {
+          "name": "Verify Receipt (Missing File -> 422 Unprocessable)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "order_id",
+                  "value": "TEST-MISSING-FILE",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/verify-receipt",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "verify-receipt"
+              ]
+            },
+            "description": "Submits request without required file parameter, expecting HTTP 422 validation error."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 Unprocessable Entity', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('Validation error details provided', function () {",
+                  "    pm.expect(jsonData).to.have.property('detail');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Record Verdict (Invalid Verdict Enum -> 422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "verdict",
+                  "value": "invalid_option",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/receipts/test-id/verdict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "receipts",
+                "test-id",
+                "verdict"
+              ]
+            },
+            "description": "Attempts to send an invalid verdict string (not in 'approved' or 'rejected_fraud')."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 Unprocessable Entity', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Record Verdict (Receipt Not Found -> 404)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "verdict",
+                  "value": "approved",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/receipts/non-existent-uuid-12345/verdict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "receipts",
+                "non-existent-uuid-12345",
+                "verdict"
+              ]
+            },
+            "description": "Attempts to record a verdict on a non-existent receipt ID, expecting HTTP 404."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404 Not Found', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
