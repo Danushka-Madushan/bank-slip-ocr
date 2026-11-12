@@ -14,6 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=0 \
     FLAGS_use_mkldnn=0 \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+    PYTHONWARNINGS="ignore:No ccache found:UserWarning" \
     HOME=/app \
     RECEIPT_DB_PATH=/app/data/receipts.db
 
