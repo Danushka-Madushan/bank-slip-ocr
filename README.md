@@ -2,7 +2,7 @@
   <img src="icon.svg" width="128" height="128" alt="Bank Receipt Verification Engine Logo" />
 </p>
 
-<h1 align="center">eMerchantLK Bank Receipt Verification Engine</h1>
+<h1 align="center">Bank Receipt Verification Engine</h1>
 
 <p align="center">
   <strong>Production-grade AI OCR, forensic tampering analysis, duplicate detection, and buyer trust scoring for Sri Lankan bank slips and digital wallets.</strong>
