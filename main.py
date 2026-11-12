@@ -36,6 +36,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
+os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
 import cv2
 import imagehash
 import numpy as np
@@ -141,9 +145,18 @@ def _bbox(points) -> tuple:
 
 def parse_ocr_result(raw) -> list[OcrItem]:
     items: list[OcrItem] = []
-    if not raw or raw[0] is None:
+    if not raw:
         return items
-    page = raw[0]
+    page = raw[0] if isinstance(raw, (list, tuple)) else next(iter(raw), None)
+    if page is None:
+        return items
+
+    # Unwrap PaddleOCR 3.x / PaddleX Result object if nested under `.res` or `["res"]`
+    if hasattr(page, "res") and isinstance(page.res, Mapping):
+        page = page.res
+    elif isinstance(page, Mapping) and isinstance(page.get("res"), Mapping):
+        page = page["res"]
+
     if isinstance(page, Mapping):  # PaddleOCR 3.x
         texts = page.get("rec_texts", [])
         scores = page.get("rec_scores", [])
@@ -160,38 +173,70 @@ def parse_ocr_result(raw) -> list[OcrItem]:
 class OcrEngine:
     def __init__(self) -> None:
         self._lock = threading.Lock()  # Paddle predictors are not safe to share across threads
-        self._engine = self._build()
+        self._engine, self._is_v3 = self._build()
 
     @staticmethod
     def _build():
         threads = min(4, os.cpu_count() or 2)
         attempts = (
-            dict(
-                use_angle_cls=True,
-                lang="en",
-                show_log=False,
-                det_limit_side_len=CFG.ocr_max_side,
-                cpu_threads=threads,
-                enable_mkldnn=True,
+            # PaddleOCR 3.x (PaddleX pipeline): disable MKLDNN to avoid Paddle 3.3 PIR crash,
+            # disable heavy doc unwarping, and cap the MAX side (not MIN side) at ocr_max_side.
+            (
+                True,
+                dict(
+                    lang="en",
+                    enable_mkldnn=False,
+                    cpu_threads=threads,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=True,
+                    text_det_limit_type="max",
+                    text_det_limit_side_len=CFG.ocr_max_side,
+                ),
             ),
-            dict(use_angle_cls=True, lang="en", show_log=False, det_limit_side_len=CFG.ocr_max_side),
-            dict(lang="en", use_textline_orientation=True, text_det_limit_side_len=CFG.ocr_max_side),
-            dict(lang="en"),
+            # PaddleOCR 3.x minimal fallback
+            (
+                True,
+                dict(
+                    lang="en",
+                    enable_mkldnn=False,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                ),
+            ),
+            # PaddleOCR 2.x
+            (
+                False,
+                dict(
+                    use_angle_cls=True,
+                    lang="en",
+                    show_log=False,
+                    det_limit_type="max",
+                    det_limit_side_len=CFG.ocr_max_side,
+                    cpu_threads=threads,
+                    enable_mkldnn=False,
+                ),
+            ),
+            (False, dict(lang="en")),
         )
         last: Optional[Exception] = None
-        for kwargs in attempts:
+        for is_v3, kwargs in attempts:
             try:
-                return PaddleOCR(**kwargs)
+                engine = PaddleOCR(**kwargs)
+                return engine, (is_v3 or hasattr(engine, "predict"))
             except Exception as exc:  # noqa: BLE001
                 last = exc
         raise RuntimeError("Could not initialise PaddleOCR") from last
 
     def read(self, bgr: np.ndarray) -> list[OcrItem]:
         with self._lock:
-            try:
-                raw = self._engine.ocr(bgr, cls=True)  # 2.x
-            except TypeError:
-                raw = self._engine.ocr(bgr)            # 3.x dropped `cls`
+            if self._is_v3 and hasattr(self._engine, "predict"):
+                raw = list(self._engine.predict(bgr))
+            else:
+                try:
+                    raw = self._engine.ocr(bgr, cls=True)
+                except TypeError:
+                    raw = self._engine.ocr(bgr)
         return parse_ocr_result(raw)
 
 
@@ -1199,7 +1244,7 @@ async def verify_receipt(
     expected_amount: Optional[Decimal] = Form(None, gt=0),
     expected_account: Optional[str] = Form(None, max_length=32),
     buyer_phone: Optional[str] = Form(None, max_length=32),
-    register: bool = Form(True),
+    register_receipt: bool = Form(True, alias="register"),
     include_raw_text: bool = Form(False),
 ):
     """
@@ -1226,7 +1271,7 @@ async def verify_receipt(
         expected_amount=expected_amount,
         expected_account=expected_account,
         buyer_phone=buyer_phone,
-        register=register,
+        register=register_receipt,
         include_raw_text=include_raw_text,
     )
     log.info(
