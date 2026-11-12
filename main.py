@@ -750,6 +750,7 @@ def _hamming_hex(a: str, b: str) -> int:
 class ReceiptStore:
     def __init__(self, path: str) -> None:
         self._lock = threading.Lock()
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.create_function("hamming_hex", 2, _hamming_hex, deterministic=True)
