@@ -402,9 +402,11 @@ def analyze_metadata(img: Image.Image, raw: bytes) -> dict:
     exif = img.getexif()
     tags = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()}
     software = str(tags.get("Software", "")).strip()
-    png_software = img.info.get("Software") if isinstance(img.info.get("Software"), str) else ""
-    tools = _XMP_TOOL_RX.findall(_xmp_packet(raw))
-    haystack = str(" ").join([software, png_software, *tools]).lower()
+    raw_png_software = img.info.get("Software")
+    png_software = raw_png_software.strip() if isinstance(raw_png_software, str) else ""
+    tools: list[str] = [str(t) for t in _XMP_TOOL_RX.findall(_xmp_packet(raw))]
+    text_elements: list[str] = [software, png_software, *tools]
+    haystack = " ".join(text_elements).lower()
     return {
         "format": img.format,
         "width": img.width,
