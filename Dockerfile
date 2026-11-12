@@ -48,7 +48,7 @@ RUN python -c "from paddleocr import PaddleOCR; \
 COPY --chown=appuser:appuser main.py .
 
 # Declare persistent volume for SQLite database (receipts.db, receipts.db-wal, receipts.db-shm)
-VOLUME ["/app/data"]
+# VOLUME ["/app/data"] -- this option is not supported in Railway, so we will have to mount Railway volume to /app/data in the Railway dashboard instead.
 
 EXPOSE 8000
 
