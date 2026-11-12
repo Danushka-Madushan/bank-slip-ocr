@@ -1,8 +1,50 @@
-venv/
-.venv/
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# SQLite Database, WAL & Shared Memory files
 *.db
+*.db-wal
+*.db-shm
+*.sqlite
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data/
+
+# Environment & Secret files
 .env
+.env.*
+!.env.example
+
+# OS Generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE & Editor settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs & temporary files
+*.log
+tmp/
+temp/
